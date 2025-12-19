@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import io
+import os
 import numpy as np
 import plotly.graph_objects as go
 from sklearn.impute import KNNImputer
@@ -189,10 +190,19 @@ with tab1:
         if st.session_state.processed_data:
             st.write("---")
             for fname, data in st.session_state.processed_data.items():
+                clean_name = os.path.splitext(fname)[0] 
+                
                 with st.expander(f"View Gaps: {fname}"):
                     df_show = convert_to_download(data['df_raw_gaps'], output_opt, target_col)
                     st.dataframe(df_show.head(10), use_container_width=True)
-                    st.download_button("Download CSV", df_show.to_csv(index=False).encode('utf-8'), f"Gaps_{fname}.csv", "text/csv")
+                    
+                    c1, c2 = st.columns(2)
+                    c1.download_button("📥 Download CSV", df_show.to_csv(index=False).encode('utf-8'), f"Gaps_{clean_name}.csv", "text/csv")
+                    
+                    buf = io.BytesIO()
+                    with pd.ExcelWriter(buf, engine='xlsxwriter') as writer: df_show.to_excel(writer, index=False)
+                    c2.download_button("📥 Download Excel", buf.getvalue(), f"Gaps_{clean_name}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
     elif not uploaded_files:
         st.warning("Upload files to see options.")
 
@@ -210,15 +220,17 @@ with tab2:
             st.write("---")
             for fname, data in st.session_state.processed_data.items():
                 if data['df_imputed'] is not None:
+                    clean_name = os.path.splitext(fname)[0]
+
                     with st.expander(f"Download: {fname}"):
                         df_out = convert_to_download(data['df_imputed'], output_opt, target_col)
                         
                         col1, col2 = st.columns(2)
-                        st.download_button("Download CSV", df_out.to_csv(index=False).encode('utf-8'), f"Imputed_{fname}.csv", "text/csv", key=f"c_{fname}")
+                        col1.download_button("📥 Download CSV", df_out.to_csv(index=False).encode('utf-8'), f"Imputed_{clean_name}.csv", "text/csv", key=f"c_{fname}")
                         
                         buf = io.BytesIO()
                         with pd.ExcelWriter(buf, engine='xlsxwriter') as writer: df_out.to_excel(writer, index=False)
-                        st.download_button("Download Excel", buf.getvalue(), f"Imputed_{fname}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"x_{fname}")
+                        col2.download_button("📥 Download Excel", buf.getvalue(), f"Imputed_{clean_name}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"x_{fname}")
 
 # --- TAB 3 ---
 with tab3:
@@ -227,6 +239,8 @@ with tab3:
         summary_list = []
         for fname, data in st.session_state.processed_data.items():
             if data['df_imputed'] is not None:
+                clean_name = os.path.splitext(fname)[0]
+                
                 total = len(data['df_imputed'])
                 valid_orig = data['original_count']
                 valid_final = data['df_imputed']['Value'].notna().sum()
@@ -251,8 +265,33 @@ with tab3:
                 
                 buf = io.StringIO()
                 fig.write_html(buf, include_plotlyjs='cdn')
-                st.download_button("📷 Download Graph (HTML)", buf.getvalue().encode(), f"Graph_{fname}.html", "text/html")
+                st.download_button("📷 Download Graph (HTML)", buf.getvalue().encode(), f"Graph_{clean_name}.html", "text/html")
 
         if summary_list:
             st.write("---")
-            st.table(pd.DataFrame(summary_list))
+            st.subheader("📊 Global Summary Table")
+            df_summary = pd.DataFrame(summary_list)
+            st.table(df_summary)
+            
+            # --- NEW: DOWNLOAD BUTTONS FOR SUMMARY ---
+            col1, col2 = st.columns(2)
+            
+            # CSV Download
+            csv = df_summary.to_csv(index=False).encode('utf-8')
+            col1.download_button(
+                label="📥 Download Summary (CSV)",
+                data=csv,
+                file_name="Summary_Report.csv",
+                mime="text/csv"
+            )
+            
+            # Excel Download
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
+                df_summary.to_excel(writer, index=False)
+            col2.download_button(
+                label="📥 Download Summary (Excel)",
+                data=buf.getvalue(),
+                file_name="Summary_Report.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
