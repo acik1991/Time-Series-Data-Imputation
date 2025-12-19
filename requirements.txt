@@ -5,3 +5,4 @@ xlsxwriter
 scikit-learn
 scipy
 plotly
+fastdtw
