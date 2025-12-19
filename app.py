@@ -8,18 +8,26 @@ from sklearn.linear_model import LinearRegression
 
 # --- 1. Helper Functions ---
 
+def get_file_headers(uploaded_file):
+    """
+    Reads just the first few rows to extract column names efficiently.
+    """
+    try:
+        if uploaded_file.name.endswith('.csv'):
+            df = pd.read_csv(uploaded_file, nrows=0)
+        else:
+            df = pd.read_excel(uploaded_file, nrows=0)
+        return list(df.columns)
+    except Exception as e:
+        st.error(f"Error reading headers: {e}")
+        return []
+
 @st.cache_data
-def load_and_reindex(file, file_ext, date_col, time_col, target_input, is_combined, auto_target, fsm_range=None):
+def load_and_reindex(file, file_ext, date_col, time_col, target_col, is_combined, fsm_range=None):
     try:
         # Load
         df = pd.read_csv(file) if file_ext == 'csv' else pd.read_excel(file)
         
-        # Auto-Detect Logic
-        if auto_target:
-            target_col = df.columns[-1]
-        else:
-            target_col = target_input
-
         # Parse Dates
         try:
             if is_combined:
@@ -27,12 +35,15 @@ def load_and_reindex(file, file_ext, date_col, time_col, target_input, is_combin
             else:
                 df['Timestamp'] = pd.to_datetime(df[date_col].astype(str) + ' ' + df[time_col].astype(str), dayfirst=True)
         except KeyError:
-            return None, f"Column not found! Check your headers. Found: {list(df.columns)}"
+            return None, f"Column mismatch! The file {file.name} does not have the same columns as the first file."
 
         # Clean & Sort
         df = df.drop_duplicates(subset=['Timestamp']).sort_values('Timestamp').set_index('Timestamp')
         
-        # Ensure target column is numeric (force non-numeric to NaN)
+        # Ensure target column is numeric
+        if target_col not in df.columns:
+            return None, f"Target column '{target_col}' not found in {file.name}."
+            
         df[target_col] = pd.to_numeric(df[target_col], errors='coerce')
 
         # Identify Range
@@ -42,11 +53,11 @@ def load_and_reindex(file, file_ext, date_col, time_col, target_input, is_combin
         else:
             full_range = pd.date_range(start=df.index.min(), end=df.index.max(), freq='h')
         
-        # Reindex (Create Gaps)
+        # Reindex
         df_reindexed = df[[target_col]].reindex(full_range)
         df_reindexed.columns = ['Value'] 
         
-        # Count actual valid data points (excluding NaNs in original file)
+        # Count actual valid data points
         valid_original_count = df_reindexed['Value'].notna().sum()
         
         return df_reindexed, valid_original_count
@@ -56,19 +67,13 @@ def load_and_reindex(file, file_ext, date_col, time_col, target_input, is_combin
 
 def apply_imputation(df, method):
     df_out = df.copy()
-    
     if method == "LOCF (Last Observation Carried Forward)":
         df_out['Value'] = df_out['Value'].ffill()
-        
     elif method == "Linear Interpolation":
         df_out['Value'] = df_out['Value'].interpolate(method='linear')
-        
     elif method == "Cubic Spline":
-        try:
-            df_out['Value'] = df_out['Value'].interpolate(method='spline', order=3)
-        except:
-            pass # Fallback or keep NaN
-        
+        try: df_out['Value'] = df_out['Value'].interpolate(method='spline', order=3)
+        except: pass 
     elif method == "Linear Regression":
         df_out['Time_Idx'] = np.arange(len(df_out))
         known = df_out[df_out['Value'].notnull()]
@@ -76,17 +81,14 @@ def apply_imputation(df, method):
         if not unknown.empty and len(known) > 1:
             model = LinearRegression()
             model.fit(known[['Time_Idx']], known['Value'])
-            pred = model.predict(unknown[['Time_Idx']])
-            df_out.loc[df_out['Value'].isnull(), 'Value'] = pred
+            df_out.loc[df_out['Value'].isnull(), 'Value'] = model.predict(unknown[['Time_Idx']])
         df_out = df_out.drop(columns=['Time_Idx'])
-
     elif method == "K-Nearest Neighbors (KNN)":
         imputer = KNNImputer(n_neighbors=5)
         df_out['Time_Idx'] = np.arange(len(df_out))
-        imputed_array = imputer.fit_transform(df_out[['Time_Idx', 'Value']])
-        df_out['Value'] = imputed_array[:, 1]
+        imp = imputer.fit_transform(df_out[['Time_Idx', 'Value']])
+        df_out['Value'] = imp[:, 1]
         df_out = df_out.drop(columns=['Time_Idx'])
-        
     return df_out
 
 def convert_to_download(df, output_opt, header_name):
@@ -102,29 +104,53 @@ def convert_to_download(df, output_opt, header_name):
 st.set_page_config(page_title="HydroGap Filler", layout="wide")
 st.title("🌊 Hydrological Data Processor")
 
-# Sidebar
-st.sidebar.header("1. File Configuration")
-is_combined = st.sidebar.checkbox("Date & Time in ONE column", value=True)
+# --- SIDEBAR: Upload First, Then Configure ---
+st.sidebar.header("1. Upload Files")
+uploaded_files = st.sidebar.file_uploader("Select CSV or Excel files", type=['csv', 'xlsx'], accept_multiple_files=True)
 
-if is_combined:
-    date_input = st.sidebar.text_input("Datetime Header", value="Start of Interval (UTC+08:00)")
-    time_input = None
+# Default variables
+date_col = None
+time_col = None
+target_col = None
+
+if uploaded_files:
+    # --- DYNAMIC COLUMN CONFIGURATION ---
+    st.sidebar.header("2. Column Mapping")
+    st.sidebar.info("Detected columns from the first file.")
+    
+    # Read headers from the first file to populate dropdowns
+    first_file = uploaded_files[0]
+    first_file.seek(0) # Reset buffer before reading
+    columns = get_file_headers(first_file)
+    first_file.seek(0) # Reset buffer again for later processing
+
+    if columns:
+        is_combined = st.sidebar.checkbox("Date & Time in ONE column", value=True)
+        
+        if is_combined:
+            # Try to auto-select a column that looks like 'Date'
+            default_ix = next((i for i, c in enumerate(columns) if 'date' in c.lower() or 'time' in c.lower()), 0)
+            date_col = st.sidebar.selectbox("Select Datetime Column", columns, index=default_ix)
+        else:
+            d_ix = next((i for i, c in enumerate(columns) if 'date' in c.lower()), 0)
+            t_ix = next((i for i, c in enumerate(columns) if 'time' in c.lower()), 1)
+            date_col = st.sidebar.selectbox("Select Date Column", columns, index=d_ix)
+            time_col = st.sidebar.selectbox("Select Time Column", columns, index=t_ix)
+        
+        # Target Column Selection
+        st.sidebar.markdown("---")
+        # Default to the last column as it's usually the value
+        target_col = st.sidebar.selectbox("Select Target Value Column", columns, index=len(columns)-1)
+        
+        st.sidebar.markdown("---")
+        output_opt = st.sidebar.radio("Download Format", ["Separate Columns", "Combined Column"])
+    else:
+        st.error("Could not read columns from the first file.")
+
 else:
-    date_input = st.sidebar.text_input("Date Header", value="Date")
-    time_input = st.sidebar.text_input("Time Header", value="Time")
+    st.info("👈 Please upload files in the sidebar to begin.")
 
-st.sidebar.markdown("---")
-auto_target = st.sidebar.checkbox("Auto-detect Target Column", value=True)
-if not auto_target:
-    target_input = st.sidebar.text_input("Target Header", value="Water Level")
-else:
-    target_input = None
-    st.sidebar.info("Using last column as target.")
-
-st.sidebar.markdown("---")
-output_opt = st.sidebar.radio("Download Format", ["Separate Columns", "Combined Column"])
-uploaded_files = st.file_uploader("Upload Files", type=['csv', 'xlsx'], accept_multiple_files=True)
-
+# --- MAIN TABS ---
 tab1, tab2, tab3 = st.tabs(["📅 1. Calendar Completion", "🛠️ 2. Imputation Strategy", "📊 3. Viz & Summary"])
 
 if 'processed_data' not in st.session_state:
@@ -133,26 +159,42 @@ if 'processed_data' not in st.session_state:
 # --- TAB 1 ---
 with tab1:
     st.header("Step 1: Create Hourly Skeleton")
-    use_fsm_range = st.checkbox("Enable FSM Range")
-    fsm_dates = None
-    if use_fsm_range:
-        c1, c2 = st.columns(2)
-        fsm_dates = (c1.date_input("Start"), c2.date_input("End"))
+    
+    if uploaded_files and target_col:
+        use_fsm_range = st.checkbox("Enable FSM Range")
+        fsm_dates = None
+        if use_fsm_range:
+            c1, c2 = st.columns(2)
+            fsm_dates = (c1.date_input("Start"), c2.date_input("End"))
 
-    if st.button("Run Calendar Completion") and uploaded_files:
-        st.session_state.processed_data = {} 
-        for file in uploaded_files:
-            ext = file.name.split('.')[-1]
-            df_gaps, orig_count = load_and_reindex(file, ext, date_input, time_input, target_input, is_combined, auto_target, fsm_dates)
-            if isinstance(orig_count, str):
-                st.error(f"{file.name}: {orig_count}")
-            else:
-                st.session_state.processed_data[file.name] = {
-                    'df_raw_gaps': df_gaps,
-                    'original_count': orig_count, # Valid non-nulls in original
-                    'df_imputed': None
-                }
-        st.success("Done! Go to Tab 2.")
+        if st.button("Run Calendar Completion"):
+            st.session_state.processed_data = {} 
+            for file in uploaded_files:
+                file.seek(0) # IMPORTANT: Reset buffer for pandas read
+                ext = file.name.split('.')[-1]
+                
+                df_gaps, orig_count = load_and_reindex(file, ext, date_col, time_col, target_col, is_combined, fsm_dates)
+                
+                if isinstance(orig_count, str):
+                    st.error(f"{file.name}: {orig_count}")
+                else:
+                    st.session_state.processed_data[file.name] = {
+                        'df_raw_gaps': df_gaps,
+                        'original_count': orig_count,
+                        'df_imputed': None
+                    }
+            st.success("Done! Go to Tab 2.")
+            
+        # Preview
+        if st.session_state.processed_data:
+            st.write("---")
+            for fname, data in st.session_state.processed_data.items():
+                with st.expander(f"View Gaps: {fname}"):
+                    df_show = convert_to_download(data['df_raw_gaps'], output_opt, target_col)
+                    st.dataframe(df_show.head(10), use_container_width=True)
+                    st.download_button("Download CSV", df_show.to_csv(index=False).encode('utf-8'), f"Gaps_{fname}.csv", "text/csv")
+    elif not uploaded_files:
+        st.warning("Upload files to see options.")
 
 # --- TAB 2 ---
 with tab2:
@@ -164,88 +206,53 @@ with tab2:
                 st.session_state.processed_data[fname]['df_imputed'] = apply_imputation(data['df_raw_gaps'], method)
             st.success(f"Applied {method}!")
 
-        st.write("---")
-        for fname, data in st.session_state.processed_data.items():
-            if data['df_imputed'] is not None:
-                with st.expander(f"Download: {fname}"):
-                    disp_name = target_input if target_input else "Water Level"
-                    df_out = convert_to_download(data['df_imputed'], output_opt, disp_name)
-                    st.download_button("Download CSV", df_out.to_csv(index=False).encode('utf-8'), f"Imputed_{fname}.csv", "text/csv")
+        if any(d['df_imputed'] is not None for d in st.session_state.processed_data.values()):
+            st.write("---")
+            for fname, data in st.session_state.processed_data.items():
+                if data['df_imputed'] is not None:
+                    with st.expander(f"Download: {fname}"):
+                        df_out = convert_to_download(data['df_imputed'], output_opt, target_col)
+                        
+                        col1, col2 = st.columns(2)
+                        st.download_button("Download CSV", df_out.to_csv(index=False).encode('utf-8'), f"Imputed_{fname}.csv", "text/csv", key=f"c_{fname}")
+                        
+                        buf = io.BytesIO()
+                        with pd.ExcelWriter(buf, engine='xlsxwriter') as writer: df_out.to_excel(writer, index=False)
+                        st.download_button("Download Excel", buf.getvalue(), f"Imputed_{fname}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"x_{fname}")
 
-# --- TAB 3 (UPDATED) ---
+# --- TAB 3 ---
 with tab3:
     st.header("Step 3: Visualization & Report")
     if st.session_state.processed_data:
         summary_list = []
-        
         for fname, data in st.session_state.processed_data.items():
             if data['df_imputed'] is not None:
-                # --- CORRECTED MATH ---
-                total_slots = len(data['df_imputed'])
-                
-                # Count actual values (non-NaN)
-                valid_original = data['original_count'] # Calculated in load step
+                total = len(data['df_imputed'])
+                valid_orig = data['original_count']
                 valid_final = data['df_imputed']['Value'].notna().sum()
-                
-                # Actually filled = Final Valid - Original Valid
-                filled_count = valid_final - valid_original
-                
-                # Prevent negative numbers if original had dupes we cleaned
-                if filled_count < 0: filled_count = 0
-                
-                # Percentage of the *Total Timeline* that is now valid data
-                completeness = (valid_final / total_slots) * 100
+                filled = valid_final - valid_orig
+                if filled < 0: filled = 0
                 
                 summary_list.append({
                     "File Name": fname,
-                    "Total Hours (Range)": total_slots,
-                    "Original Valid Data": valid_original,
-                    "Values Successfully Filled": filled_count,
-                    "Final Completeness (%)": round(completeness, 2)
+                    "Total Hours": total,
+                    "Original Data": valid_orig,
+                    "Filled": filled,
+                    "Completeness (%)": round((valid_final/total)*100, 2)
                 })
 
-                # --- PLOTLY GRAPH ---
                 st.subheader(f"📈 {fname}")
-                
                 fig = go.Figure()
-                
-                # 1. Imputed Line (Red) - Background
-                fig.add_trace(go.Scatter(
-                    x=data['df_imputed'].index, 
-                    y=data['df_imputed']['Value'],
-                    mode='lines',
-                    name='Imputed (Filled)',
-                    line=dict(color='red', width=2)
-                ))
-                
-                # 2. Original Data (Blue) - Foreground
-                # We filter out NaNs from raw gaps to only show valid original points
+                fig.add_trace(go.Scatter(x=data['df_imputed'].index, y=data['df_imputed']['Value'], mode='lines', name='Imputed', line=dict(color='red')))
                 raw_valid = data['df_raw_gaps'].dropna()
-                fig.add_trace(go.Scatter(
-                    x=raw_valid.index, 
-                    y=raw_valid['Value'],
-                    mode='markers', # Markers show exactly where real data exists
-                    name='Original Data',
-                    marker=dict(color='blue', size=4)
-                ))
-                
-                fig.update_layout(title=f"Imputation Results: {fname}", xaxis_title="Date", yaxis_title="Water Level (m)", template="plotly_white")
-                
-                # Display Interactive Chart
+                fig.add_trace(go.Scatter(x=raw_valid.index, y=raw_valid['Value'], mode='markers', name='Original', marker=dict(color='blue', size=4)))
+                fig.update_layout(title=fname, height=400, template="plotly_white")
                 st.plotly_chart(fig, use_container_width=True)
                 
-                # Download Button for HTML
-                buffer = io.StringIO()
-                fig.write_html(buffer, include_plotlyjs='cdn')
-                html_bytes = buffer.getvalue().encode()
-                
-                st.download_button(
-                    label="📷 Download Graph (Interactive HTML)",
-                    data=html_bytes,
-                    file_name=f"Graph_{fname}.html",
-                    mime="text/html"
-                )
+                buf = io.StringIO()
+                fig.write_html(buf, include_plotlyjs='cdn')
+                st.download_button("📷 Download Graph (HTML)", buf.getvalue().encode(), f"Graph_{fname}.html", "text/html")
 
-        st.write("---")
-        st.subheader("📊 Summary Table")
-        st.table(pd.DataFrame(summary_list))
+        if summary_list:
+            st.write("---")
+            st.table(pd.DataFrame(summary_list))
