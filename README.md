@@ -42,5 +42,13 @@ A numeric column for the Value (e.g., Water Level).
 
 Note: The app will attempt to parse various date formats automatically using Pandas' to_datetime logic.
 
+
+How to use this workflow:
+Tab 1 (Preparation): Upload your raw files. If you want to force every file to cover the exact same dates (e.g., "Jan 1 to Dec 31"), check the FSM Range box. Click "Run Calendar Completion".
+
+Tab 2 (Analysis): Choose your math method (e.g., Cubic Spline). Click "Apply". You can preview the results and download the final clean Excel/CSV files here.
+
+Tab 3 (Audit): Go here to see the chart. You will see the Blue line (your original data) and the Red line (the filled gaps) connecting the missing pieces. The table at the bottom proves exactly how many hours were missing.
+
 📄 License
 This project is open-source and available under the MIT License.
