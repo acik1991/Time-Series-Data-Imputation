@@ -356,17 +356,69 @@ with tab2:
                         c2.download_button("📥 Excel", buf.getvalue(), f"Std_Imputed_{fname}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 # --- TAB 3: VIZ (Standard) ---
+# --- TAB 3 ---
 with tab3:
-    st.header("Step 3: Quality Report (Standard)")
+    st.header("Step 3: Visualization & Report")
     if st.session_state.processed_data:
+        summary_list = []
         for fname, data in st.session_state.processed_data.items():
             if data['df_imputed'] is not None:
+                clean_name = os.path.splitext(fname)[0]
+                
+                total = len(data['df_imputed'])
+                valid_orig = data['original_count']
+                valid_final = data['df_imputed']['Value'].notna().sum()
+                filled = valid_final - valid_orig
+                if filled < 0: filled = 0
+                
+                summary_list.append({
+                    "File Name": fname,
+                    "Total Hours": total,
+                    "Original Data": valid_orig,
+                    "Filled": filled,
+                    "Completeness (%)": round((valid_final/total)*100, 2)
+                })
+
                 st.subheader(f"📈 {fname}")
                 fig = go.Figure()
                 fig.add_trace(go.Scatter(x=data['df_imputed'].index, y=data['df_imputed']['Value'], mode='lines', name='Imputed', line=dict(color='red')))
                 raw_valid = data['df_raw_gaps'].dropna()
                 fig.add_trace(go.Scatter(x=raw_valid.index, y=raw_valid['Value'], mode='markers', name='Original', marker=dict(color='blue', size=4)))
+                fig.update_layout(title=fname, height=400, template="plotly_white")
                 st.plotly_chart(fig, use_container_width=True)
+                
+                buf = io.StringIO()
+                fig.write_html(buf, include_plotlyjs='cdn')
+                st.download_button("📷 Download Graph (HTML)", buf.getvalue().encode(), f"Graph_{clean_name}.html", "text/html")
+
+        if summary_list:
+            st.write("---")
+            st.subheader("📊 Global Summary Table")
+            df_summary = pd.DataFrame(summary_list)
+            st.table(df_summary)
+            
+            # --- NEW: DOWNLOAD BUTTONS FOR SUMMARY ---
+            col1, col2 = st.columns(2)
+            
+            # CSV Download
+            csv = df_summary.to_csv(index=False).encode('utf-8')
+            col1.download_button(
+                label="📥 Download Summary (CSV)",
+                data=csv,
+                file_name="Summary_Report.csv",
+                mime="text/csv"
+            )
+            
+            # Excel Download
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
+                df_summary.to_excel(writer, index=False)
+            col2.download_button(
+                label="📥 Download Summary (Excel)",
+                data=buf.getvalue(),
+                file_name="Summary_Report.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
 # --- TAB 4: ADVANCED FSM ---
 with tab4:
